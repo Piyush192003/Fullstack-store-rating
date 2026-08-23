@@ -1,0 +1,28 @@
+# --- Dependencies (reinstallable) ---
+node_modules/
+BackEnd/node_modules/
+FrontEnd/myapp/node_modules/
+
+# --- Environment / secrets ---
+BackEnd/.env
+.env
+*.env.local
+
+# --- Runtime logs & temp files ---
+*.log
+*.tmp
+*.cache
+*.out
+*.err
+
+# --- Uploaded user content (don't version store photos) ---
+BackEnd/uploads/
+uploads/
+
+# --- Build output & OS clutter ---
+dist/
+build/
+.DS_Store
+Thumbs.db
+*.vscode
+.idea/
