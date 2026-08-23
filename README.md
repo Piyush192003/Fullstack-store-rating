@@ -1,0 +1,1 @@
+# Fullstack-store-rating
