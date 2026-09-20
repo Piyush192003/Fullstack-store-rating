@@ -50,6 +50,15 @@ if (require.main === module) {
     try {
       await connectDB();
 
+      // Seed reference data (default categories) on a fresh database.
+      // Admin-created categories are never touched.
+      try {
+        const { ensureDefaultCategories } = require('./scripts/seed-categories');
+        await ensureDefaultCategories();
+      } catch (seedErr) {
+        console.warn('Category seeding skipped:', seedErr.message);
+      }
+
       // NOTE: There is no automatic admin seeding.
       // Create the first admin on a fresh database with:
       //   npm run create-admin -- <email> <password>

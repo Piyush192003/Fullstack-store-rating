@@ -1,12 +1,12 @@
 // Emergency recovery tool - reactivate a suspended account and optionally reset its password.
 // Usage: node scripts/unlock-user.js <email> [newPassword]
 require('dotenv').config();
-const mongoose = require('../config/db');
+const { connectDB, mongoose } = require('../config/db');
 const { User } = require('../models');
 
 (async () => {
   try {
-    await mongoose.connectDB();
+    await connectDB();
     const email = process.argv[2];
     if (!email) {
       console.error('Usage: node scripts/unlock-user.js <email> [newPassword]');

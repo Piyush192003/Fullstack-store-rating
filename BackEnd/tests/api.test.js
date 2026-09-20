@@ -112,3 +112,17 @@ test('guest login without role defaults to user', async () => {
   assert.strictEqual(g.status, 200);
   assert.strictEqual(g.body.user.role, 'user');
 });
+
+test('default categories are seeded and publicly listed', async () => {
+  const { ensureDefaultCategories } = require('../scripts/seed-categories');
+  const seeded = await ensureDefaultCategories();
+  const list = await req('GET', '/categories');
+  assert.strictEqual(list.status, 200);
+  assert.ok(Array.isArray(list.body) && list.body.length >= 10, `expected seeded categories, got ${JSON.stringify(list.body)}`);
+  assert.ok(list.body.every((c) => typeof c.id === 'number' && typeof c.name === 'string'));
+  // idempotent: a second run must not duplicate anything
+  assert.strictEqual(await ensureDefaultCategories(), false);
+  const again = await req('GET', '/categories');
+  assert.strictEqual(again.body.length, list.body.length);
+  void seeded;
+});

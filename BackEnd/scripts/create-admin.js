@@ -2,7 +2,7 @@
 // Usage: node scripts/create-admin.js <email> <password> [name]
 // Or set ADMIN_EMAIL / ADMIN_PASSWORD env vars and run `npm run create-admin`.
 require('dotenv').config();
-const mongoose = require('../config/db');
+const { connectDB, mongoose } = require('../config/db');
 const bcrypt = require('bcrypt');
 const { User } = require('../models');
 
@@ -22,7 +22,7 @@ const { User } = require('../models');
       process.exit(1);
     }
 
-    await mongoose.connectDB();
+    await connectDB();
 
     const existing = await User.findOne({ email });
     if (existing) {

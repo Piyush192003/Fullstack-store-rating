@@ -1,12 +1,12 @@
 // Permanently delete an account by email.
 // Usage: node scripts/delete-user.js <email>
 require('dotenv').config();
-const mongoose = require('../config/db');
+const { connectDB, mongoose } = require('../config/db');
 const { User, deleteUserCascade } = require('../models');
 
 (async () => {
   try {
-    await mongoose.connectDB();
+    await connectDB();
     const email = process.argv[2];
     if (!email) {
       console.error('Usage: node scripts/delete-user.js <email>');

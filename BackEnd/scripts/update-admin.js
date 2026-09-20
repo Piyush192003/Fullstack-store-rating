@@ -1,7 +1,7 @@
 // Update an admin account's email and password (password re-hashed with bcrypt).
 // Usage: node scripts/update-admin.js <currentEmail> <newEmail> <newPassword>
 require('dotenv').config();
-const mongoose = require('../config/db');
+const { connectDB, mongoose } = require('../config/db');
 const bcrypt = require('bcrypt');
 const { User } = require('../models');
 
@@ -20,7 +20,7 @@ const { User } = require('../models');
       process.exit(1);
     }
 
-    await mongoose.connectDB();
+    await connectDB();
 
     const user = await User.findOne({ email: currentEmail.toLowerCase() });
     if (!user) {
