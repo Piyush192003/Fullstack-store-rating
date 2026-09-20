@@ -1,11 +1,15 @@
-const { DataTypes } = require('sequelize');
+const mongoose = require('mongoose');
+const { applyIdAndJson } = require('./utils');
 
-module.exports = (sequelize) => {
-  return sequelize.define('Category', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    name: { type: DataTypes.STRING(80), allowNull: false, unique: true }
-  }, {
-    tableName: 'categories',
-    timestamps: true
-  });
-};
+const categorySchema = new mongoose.Schema(
+  {
+    _id: { type: Number },
+
+    name: { type: String, required: true, unique: true, maxlength: 80, trim: true }
+  },
+  { timestamps: true }
+);
+
+applyIdAndJson(categorySchema, 'categories');
+
+module.exports = mongoose.models.Category || mongoose.model('Category', categorySchema);

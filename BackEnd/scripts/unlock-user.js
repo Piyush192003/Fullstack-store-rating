@@ -1,18 +1,18 @@
-// Emergency recovery tool — reactivate a suspended account and optionally reset its password.
+// Emergency recovery tool - reactivate a suspended account and optionally reset its password.
 // Usage: node scripts/unlock-user.js <email> [newPassword]
 require('dotenv').config();
-const sequelize = require('../config/db');
+const mongoose = require('../config/db');
 const { User } = require('../models');
 
 (async () => {
   try {
-    await sequelize.authenticate();
+    await mongoose.connectDB();
     const email = process.argv[2];
     if (!email) {
       console.error('Usage: node scripts/unlock-user.js <email> [newPassword]');
       process.exit(1);
     }
-    const user = await User.findOne({ where: { email } });
+    const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
       console.error('No account found for ' + email);
       process.exit(1);

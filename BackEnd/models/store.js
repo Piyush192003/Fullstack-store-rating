@@ -1,34 +1,37 @@
-const { DataTypes } = require('sequelize');
+const mongoose = require('mongoose');
+const { applyIdAndJson } = require('./utils');
 
-module.exports = (sequelize) => {
-  return sequelize.define('Store', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+const storeSchema = new mongoose.Schema(
+  {
+    _id: { type: Number },
 
-    name: { type: DataTypes.STRING(120), allowNull: false },
+    name: { type: String, required: true, maxlength: 120, trim: true },
 
-    email: { type: DataTypes.STRING(100), allowNull: true },
+    email: { type: String, maxlength: 100, default: null },
 
-    address: { type: DataTypes.STRING(400) },
+    address: { type: String, maxlength: 400, default: null },
 
-    phone: { type: DataTypes.STRING(40), allowNull: true },
+    phone: { type: String, maxlength: 40, default: null },
 
-    description: { type: DataTypes.TEXT, allowNull: true },
+    description: { type: String, default: null },
 
-    openingHours: { type: DataTypes.STRING(240), allowNull: true },
+    openingHours: { type: String, maxlength: 240, default: null },
 
-    priceLevel: { type: DataTypes.INTEGER, allowNull: true, validate: { min: 1, max: 4 } },
+    priceLevel: { type: Number, min: 1, max: 4, default: null },
 
-    images: { type: DataTypes.JSON, allowNull: true },
+    images: { type: [String], default: [] },
 
-    categoryId: { type: DataTypes.INTEGER, allowNull: true },
+    categoryId: { type: Number, default: null, index: true },
 
-    isApproved: { type: DataTypes.BOOLEAN, defaultValue: true },
+    isApproved: { type: Boolean, default: true },
 
-    isSuspended: { type: DataTypes.BOOLEAN, defaultValue: false },
+    isSuspended: { type: Boolean, default: false },
 
-    ownerId: { type: DataTypes.INTEGER, allowNull: true }
-  }, {
-    tableName: 'stores',
-    timestamps: true
-  });
-};
+    ownerId: { type: Number, default: null, index: true }
+  },
+  { timestamps: true }
+);
+
+applyIdAndJson(storeSchema, 'stores');
+
+module.exports = mongoose.models.Store || mongoose.model('Store', storeSchema);

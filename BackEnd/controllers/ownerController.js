@@ -1,5 +1,4 @@
 const { Store, Rating, User, ReviewHelp, Category, Notification } = require('../models');
-const { Op } = require('sequelize');
 
 function helpfulCount(reviewHelps) {
   return (reviewHelps || []).length;
@@ -7,18 +6,25 @@ function helpfulCount(reviewHelps) {
 
 // Get all ratings for owner store plus trends and stats
 exports.myStoreRatings = async (req, res) => {
-  const store = await Store.findOne({
-    where: { ownerId: req.user.id },
-    include: [
-      { model: Rating, include: [{ model: User }, { model: ReviewHelp }] },
-      { model: Category }
-    ]
-  });
+  const store = await Store.findOne({ ownerId: req.user.id });
 
   if (!store)
     return res.status(404).json({ message: 'Store not found for this owner' });
 
-  const ratings = store.Ratings || [];
+  const ratings = await Rating.find({ storeId: store.id }).sort({ _id: 1 });
+
+  const [category, users, helps] = await Promise.all([
+    store.categoryId ? Category.findById(store.categoryId) : Promise.resolve(null),
+    User.find({ _id: { $in: [...new Set(ratings.map((r) => r.userId))] } }).select('name email'),
+    ReviewHelp.find({ ratingId: { $in: ratings.map((r) => r.id) } }).select('ratingId userId')
+  ]);
+
+  const userById = Object.fromEntries(users.map((u) => [u.id, u]));
+  const helpsByRating = {};
+  helps.forEach((h) => {
+    (helpsByRating[h.ratingId] = helpsByRating[h.ratingId] || []).push(h);
+  });
+
   const ratingsCount = ratings.length;
   const avg = ratingsCount
     ? ratings.reduce((sum, r) => sum + r.rating, 0) / ratingsCount
@@ -44,8 +50,8 @@ exports.myStoreRatings = async (req, res) => {
     ownerReply: r.ownerReply,
     isFlagged: r.isFlagged,
     createdAt: r.createdAt,
-    user: r.User ? { id: r.User.id, name: r.User.name, email: r.User.email } : null,
-    helpful: helpfulCount(r.ReviewHelps)
+    user: userById[r.userId] ? { id: userById[r.userId].id, name: userById[r.userId].name, email: userById[r.userId].email } : null,
+    helpful: helpfulCount(helpsByRating[r.id])
   }));
 
   res.json({
@@ -58,7 +64,7 @@ exports.myStoreRatings = async (req, res) => {
       description: store.description,
       openingHours: store.openingHours,
       priceLevel: store.priceLevel,
-      category: store.Category ? store.Category.name : null,
+      category: category ? category.name : null,
       categoryId: store.categoryId,
       images: Array.isArray(store.images) ? store.images : [],
       isApproved: store.isApproved
@@ -74,7 +80,7 @@ exports.myStoreRatings = async (req, res) => {
 
 // Update owner store information
 exports.updateStore = async (req, res) => {
-  const store = await Store.findOne({ where: { ownerId: req.user.id } });
+  const store = await Store.findOne({ ownerId: req.user.id });
   if (!store)
     return res.status(404).json({ message: 'Store not found for this owner' });
 
@@ -94,11 +100,11 @@ exports.updateStore = async (req, res) => {
 
 // Reply to a customer review
 exports.replyToReview = async (req, res) => {
-  const store = await Store.findOne({ where: { ownerId: req.user.id } });
+  const store = await Store.findOne({ ownerId: req.user.id });
   if (!store)
     return res.status(404).json({ message: 'Store not found for this owner' });
 
-  const rating = await Rating.findOne({ where: { id: req.params.ratingId, storeId: store.id } });
+  const rating = await Rating.findOne({ _id: req.params.ratingId, storeId: store.id });
   if (!rating)
     return res.status(404).json({ message: 'Review not found for this store' });
 
@@ -111,7 +117,7 @@ exports.replyToReview = async (req, res) => {
 
   // Notify the reviewer that the store responded (respect their notification prefs)
   try {
-    const reviewer = await User.findByPk(rating.userId);
+    const reviewer = await User.findById(rating.userId);
     const prefs = (reviewer && reviewer.settings && reviewer.settings.notif) || {};
     if (prefs.replies !== false)
       await Notification.create({
@@ -126,7 +132,7 @@ exports.replyToReview = async (req, res) => {
 
 // Report an abusive/fake review
 exports.reportReview = async (req, res) => {
-  const rating = await Rating.findByPk(req.params.ratingId);
+  const rating = await Rating.findById(req.params.ratingId);
   if (!rating)
     return res.status(404).json({ message: 'Review not found' });
 
@@ -152,7 +158,7 @@ exports.changePassword = async (req, res) => {
 // Register a brand-new store (owners without a store yet)
 exports.registerStore = async (req, res) => {
   try {
-    const existing = await Store.findOne({ where: { ownerId: req.user.id } });
+    const existing = await Store.findOne({ ownerId: req.user.id });
     if (existing)
       return res.status(400).json({ message: 'You already manage a store.' });
 
@@ -183,11 +189,9 @@ exports.registerStore = async (req, res) => {
 // Stores without an owner that can be claimed
 exports.listUnclaimedStores = async (req, res) => {
   try {
-    const stores = await Store.findAll({
-      where: { ownerId: null },
-      attributes: ['id', 'name', 'address'],
-      order: [['name', 'ASC']]
-    });
+    const stores = await Store.find({ ownerId: null })
+      .sort({ name: 1 })
+      .select('name address');
     res.json(stores);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -197,7 +201,7 @@ exports.listUnclaimedStores = async (req, res) => {
 // Claim an existing unowned store
 exports.claimStore = async (req, res) => {
   try {
-    const existing = await Store.findOne({ where: { ownerId: req.user.id } });
+    const existing = await Store.findOne({ ownerId: req.user.id });
     if (existing)
       return res.status(400).json({ message: 'You already manage a store.' });
 
@@ -205,7 +209,7 @@ exports.claimStore = async (req, res) => {
     if (!storeId)
       return res.status(400).json({ message: 'Store ID required' });
 
-    const store = await Store.findOne({ where: { id: storeId, ownerId: null } });
+    const store = await Store.findOne({ _id: storeId, ownerId: null });
     if (!store)
       return res.status(404).json({ message: 'That store is not available to claim.' });
 
@@ -221,7 +225,7 @@ exports.claimStore = async (req, res) => {
 // Upload store images (multipart, field name "images")
 exports.uploadImages = async (req, res) => {
   try {
-    const store = await Store.findOne({ where: { ownerId: req.user.id } });
+    const store = await Store.findOne({ ownerId: req.user.id });
     if (!store)
       return res.status(404).json({ message: 'Store not found for this owner' });
 
@@ -248,7 +252,7 @@ exports.uploadImages = async (req, res) => {
 // Remove one store image by its index
 exports.deleteImage = async (req, res) => {
   try {
-    const store = await Store.findOne({ where: { ownerId: req.user.id } });
+    const store = await Store.findOne({ ownerId: req.user.id });
     if (!store)
       return res.status(404).json({ message: 'Store not found for this owner' });
 
@@ -273,4 +277,3 @@ exports.deleteImage = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
-

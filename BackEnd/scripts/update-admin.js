@@ -1,7 +1,7 @@
 // Update an admin account's email and password (password re-hashed with bcrypt).
 // Usage: node scripts/update-admin.js <currentEmail> <newEmail> <newPassword>
 require('dotenv').config();
-const sequelize = require('../config/db');
+const mongoose = require('../config/db');
 const bcrypt = require('bcrypt');
 const { User } = require('../models');
 
@@ -20,22 +20,22 @@ const { User } = require('../models');
       process.exit(1);
     }
 
-    await sequelize.authenticate();
+    await mongoose.connectDB();
 
-    const user = await User.findOne({ where: { email: currentEmail } });
+    const user = await User.findOne({ email: currentEmail.toLowerCase() });
     if (!user) {
       console.error('No account found for ' + currentEmail);
       process.exit(1);
     }
 
     // Check the target email is not already taken by another account
-    const taken = await User.findOne({ where: { email: newEmail } });
+    const taken = await User.findOne({ email: newEmail.toLowerCase() });
     if (taken && taken.id !== user.id) {
       console.error(`Email ${newEmail} is already in use by account #${taken.id}.`);
       process.exit(1);
     }
 
-    user.email = newEmail;
+    user.email = newEmail.toLowerCase();
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
 

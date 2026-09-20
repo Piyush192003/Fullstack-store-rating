@@ -1,7 +1,17 @@
-const { User, Store, Rating, Category, Notification } = require('../models');
-const { Op } = require('sequelize');
+const { User, Store, Rating, Category, Notification, ReviewHelp, deleteStoreCascade } = require('../models');
 const { validationResult } = require('express-validator');
 const bcrypt = require('bcrypt');
+
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const likeRe = (q) => new RegExp(escapeRegex(q), 'i');
+const SORT_COLLATION = { locale: 'en', strength: 2 }; // case-insensitive, like MySQL
+
+// Full user object without the password hash (the old API leaked it)
+const safeUser = (u) => {
+  const json = u.toJSON ? u.toJSON() : u;
+  delete json.password;
+  return json;
+};
 
 // Add user
 exports.addUser = async (req, res) => {
@@ -16,15 +26,17 @@ exports.addUser = async (req, res) => {
 
     const user = await User.create({
       name,
-      email,
+      email: String(email).trim().toLowerCase(),
       address,
       password: hashedPassword,
       role: role || 'user'
     });
 
-    return res.json({ user });
+    return res.json({ user: safeUser(user) });
 
   } catch (err) {
+    if (err && err.code === 11000)
+      return res.status(400).json({ message: 'Email already in use' });
     return res.status(500).json({ message: err.message });
   }
 };
@@ -34,7 +46,7 @@ exports.addStore = async (req, res) => {
 
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    console.log("Validation Errors:", errors.array()); // DEBUG ADDED
+    console.log('Validation Errors:', errors.array());
     return res.status(400).json({ errors: errors.array() });
   }
 
@@ -56,19 +68,20 @@ exports.addStore = async (req, res) => {
     return res.json({ store });
 
   } catch (err) {
-    console.log("SERVER ERROR:", err); // DEBUG ADDED
+    console.log('SERVER ERROR:', err);
     return res.status(500).json({ message: err.message });
   }
 };
+
 // Dashboard summary
 exports.dashboard = async (req, res) => {
   try {
     const [totalUsers, totalStores, totalRatings, flaggedReviews, pendingStores] = await Promise.all([
-      User.count(),
-      Store.count(),
-      Rating.count(),
-      Rating.count({ where: { isFlagged: true } }),
-      Store.count({ where: { isApproved: false, isSuspended: false } })
+      User.countDocuments(),
+      Store.countDocuments(),
+      Rating.countDocuments(),
+      Rating.countDocuments({ isFlagged: true }),
+      Store.countDocuments({ isApproved: false, isSuspended: false })
     ]);
 
     res.json({ totalUsers, totalStores, totalRatings, flaggedReviews, pendingStores });
@@ -82,50 +95,54 @@ exports.dashboard = async (req, res) => {
 exports.listUsers = async (req, res) => {
   const { q, role, sortBy = 'name', order = 'ASC' } = req.query;
   const safeSortBy = ['name', 'email', 'address', 'role'].includes(sortBy) ? sortBy : 'name';
-  const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
+  const safeOrder = order === 'DESC' ? 'desc' : 'asc';
 
-  const where = {};
-  if (role) where.role = role;
+  const filter = {};
+  if (role) filter.role = role;
   if (q) {
-    where[Op.or] = [
-      { name: { [Op.like]: `%${q}%` } },
-      { email: { [Op.like]: `%${q}%` } },
-      { address: { [Op.like]: `%${q}%` } }
+    filter.$or = [
+      { name: likeRe(q) },
+      { email: likeRe(q) },
+      { address: likeRe(q) }
     ];
   }
 
-  const users = await User.findAll({ where, order: [[safeSortBy, safeOrder]] });
+  const users = await User.find(filter)
+    .collation(SORT_COLLATION)
+    .sort({ [safeSortBy]: safeOrder });
 
-  res.json({ users });
+  res.json({ users: users.map(safeUser) });
 };
 
 // List stores with avg ratings
 exports.listStores = async (req, res) => {
   const { q, sortBy = 'name', order = 'ASC' } = req.query;
   const safeSortBy = ['name', 'email', 'address'].includes(sortBy) ? sortBy : 'name';
-  const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
+  const safeOrder = order === 'DESC' ? 'desc' : 'asc';
 
-  const where = {};
+  const filter = {};
   if (q) {
-    where[Op.or] = [
-      { name: { [Op.like]: `%${q}%` } },
-      { address: { [Op.like]: `%${q}%` } }
+    filter.$or = [
+      { name: likeRe(q) },
+      { address: likeRe(q) }
     ];
   }
 
-  const stores = await Store.findAll({
-    where,
-    include: [Rating, Category],
-    order: [[safeSortBy, safeOrder]]
+  const [stores, ratings] = await Promise.all([
+    Store.find(filter).collation(SORT_COLLATION).sort({ [safeSortBy]: safeOrder }),
+    Rating.find().select('storeId rating')
+  ]);
+
+  const byStore = new Map();
+  ratings.forEach((r) => {
+    const list = byStore.get(r.storeId) || [];
+    list.push(r.rating);
+    byStore.set(r.storeId, list);
   });
 
-  const result = stores.map(s => {
-    const ratings = s.Ratings || [];
-    const avg =
-      ratings.length > 0
-        ? ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length
-        : null;
-
+  const result = stores.map((s) => {
+    const list = byStore.get(s.id) || [];
+    const avg = list.length > 0 ? list.reduce((sum, v) => sum + v, 0) / list.length : null;
     return {
       id: s.id,
       name: s.name,
@@ -136,14 +153,22 @@ exports.listStores = async (req, res) => {
       openingHours: s.openingHours,
       priceLevel: s.priceLevel,
       ownerId: s.ownerId,
-      category: s.Category ? s.Category.name : null,
+      category: null,
       categoryId: s.categoryId,
       isApproved: s.isApproved,
       isSuspended: s.isSuspended,
       avgRating: avg,
-      ratingCount: ratings.length
+      ratingCount: list.length
     };
   });
+
+  // Resolve category names with one extra query
+  const catIds = [...new Set(stores.map((s) => s.categoryId).filter((v) => v !== null && v !== undefined))];
+  if (catIds.length) {
+    const cats = await Category.find({ _id: { $in: catIds } }).select('name');
+    const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
+    result.forEach((r) => { if (r.categoryId != null) r.category = catName[r.categoryId] || null; });
+  }
 
   res.json(result);
 };
@@ -152,31 +177,26 @@ exports.listStores = async (req, res) => {
 exports.getUserDetail = async (req, res) => {
   const { id } = req.params;
 
-  const user = await User.findByPk(id, { include: Store });
-
+  const user = await User.findById(id);
   if (!user) return res.status(404).json({ message: 'User not found' });
+
+  // The old API embedded the user's store as `user.Store`
+  const store = await Store.findOne({ ownerId: user.id });
 
   let ownerRating = null;
 
-  if (user.role === 'owner') {
-    const store = await Store.findOne({
-      where: { ownerId: user.id },
-      include: [Rating]
-    });
-
-    if (store && store.Ratings.length > 0) {
-      ownerRating =
-        store.Ratings.reduce((sum, r) => sum + r.rating, 0) /
-        store.Ratings.length;
-    }
+  if (user.role === 'owner' && store) {
+    const ratings = await Rating.find({ storeId: store.id }).select('rating');
+    if (ratings.length > 0)
+      ownerRating = ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length;
   }
 
-  res.json({ user, ownerRating });
+  res.json({ user: { ...safeUser(user), Store: store || null }, ownerRating });
 };
 
 // Toggle a user's suspended status
 exports.changeUserStatus = async (req, res) => {
-  const user = await User.findByPk(req.params.id);
+  const user = await User.findById(req.params.id);
   if (!user) return res.status(404).json({ message: 'User not found' });
 
   // Safety: administrator accounts can never be suspended from here,
@@ -191,7 +211,7 @@ exports.changeUserStatus = async (req, res) => {
 
 // Approve or suspend a store
 exports.changeStoreStatus = async (req, res) => {
-  const store = await Store.findByPk(req.params.id);
+  const store = await Store.findById(req.params.id);
   if (!store) return res.status(404).json({ message: 'Store not found' });
   const { isApproved, isSuspended } = req.body;
   if (typeof isApproved === 'boolean') store.isApproved = isApproved;
@@ -201,7 +221,7 @@ exports.changeStoreStatus = async (req, res) => {
   // Notify the owner when their store gets approved (respect their prefs)
   if (store.isApproved && !store.isSuspended && store.ownerId) {
     try {
-      const owner = await User.findByPk(store.ownerId);
+      const owner = await User.findById(store.ownerId);
       const prefs = (owner && owner.settings && owner.settings.notif) || {};
       if (prefs.storeUpdates !== false)
         await Notification.create({
@@ -217,31 +237,48 @@ exports.changeStoreStatus = async (req, res) => {
 
 // Reject / permanently remove a store listing
 exports.deleteStore = async (req, res) => {
-  const deleted = await Store.destroy({ where: { id: req.params.id } });
-  if (!deleted) return res.status(404).json({ message: 'Store not found' });
+  const store = await Store.findById(req.params.id);
+  if (!store) return res.status(404).json({ message: 'Store not found' });
+  await deleteStoreCascade(store.id);
+  await store.deleteOne();
   res.json({ message: 'Store listing removed' });
 };
 
 // Delete a review (moderation)
 exports.deleteReview = async (req, res) => {
-  const deleted = await Rating.destroy({ where: { id: req.params.ratingId } });
-  if (!deleted) return res.status(404).json({ message: 'Review not found' });
+  const rating = await Rating.findById(req.params.ratingId);
+  if (!rating) return res.status(404).json({ message: 'Review not found' });
+  await ReviewHelp.deleteMany({ ratingId: rating.id });
+  await rating.deleteOne();
   res.json({ message: 'Review deleted' });
 };
 
 // List flagged reviews
 exports.listFlaggedReviews = async (req, res) => {
-  const reviews = await Rating.findAll({
-    where: { isFlagged: true },
-    include: [{ model: User, attributes: ['id', 'name', 'email'] }, { model: Store, attributes: ['id', 'name'] }],
-    order: [['updatedAt', 'DESC']]
-  });
-  res.json(reviews.map((r) => ({ id: r.id, rating: r.rating, review: r.review, isFlagged: r.isFlagged, createdAt: r.createdAt, user: r.User, store: r.Store })));
+  const reviews = await Rating.find({ isFlagged: true }).sort({ updatedAt: -1 });
+
+  const [users, stores] = await Promise.all([
+    User.find({ _id: { $in: [...new Set(reviews.map((r) => r.userId))] } }).select('name email'),
+    Store.find({ _id: { $in: [...new Set(reviews.map((r) => r.storeId))] } }).select('name')
+  ]);
+
+  const userById = Object.fromEntries(users.map((u) => [u.id, u]));
+  const storeById = Object.fromEntries(stores.map((s) => [s.id, s]));
+
+  res.json(reviews.map((r) => ({
+    id: r.id,
+    rating: r.rating,
+    review: r.review,
+    isFlagged: r.isFlagged,
+    createdAt: r.createdAt,
+    user: userById[r.userId] || null,
+    store: storeById[r.storeId] || null
+  })));
 };
 
 // Clear a flag after review (reviewer: keep review, remove flag)
 exports.clearFlag = async (req, res) => {
-  const rating = await Rating.findByPk(req.params.ratingId);
+  const rating = await Rating.findById(req.params.ratingId);
   if (!rating) return res.status(404).json({ message: 'Review not found' });
   rating.isFlagged = false;
   await rating.save();
@@ -251,13 +288,13 @@ exports.clearFlag = async (req, res) => {
 // Get one store (for the admin edit form)
 exports.getStoreDetail = async (req, res) => {
   try {
-    const store = await Store.findByPk(req.params.id, {
-      include: [{ model: User, as: 'owner', attributes: ['id', 'name'] }]
-    });
+    const store = await Store.findById(req.params.id);
     if (!store) return res.status(404).json({ message: 'Store not found' });
+
+    const owner = store.ownerId ? await User.findById(store.ownerId).select('name') : null;
     res.json({
       store,
-      ownerName: store.owner ? store.owner.name : null
+      ownerName: owner ? owner.name : null
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -270,12 +307,12 @@ exports.updateStore = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const store = await Store.findByPk(req.params.id);
+    const store = await Store.findById(req.params.id);
     if (!store) return res.status(404).json({ message: 'Store not found' });
 
     const { name, email, address, ownerId, phone, description, openingHours, priceLevel, categoryId } = req.body;
 
-    await store.update({
+    Object.assign(store, {
       name: String(name).trim(),
       email: email || null,
       address: address || null,
@@ -287,9 +324,10 @@ exports.updateStore = async (req, res) => {
       ownerId: ownerId ? Number(ownerId) : null
     });
 
+    await store.save();
+
     res.json({ message: 'Store updated', store });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
-

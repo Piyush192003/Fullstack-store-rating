@@ -1,10 +1,16 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "StoreScope API - Express + MongoDB (Mongoose)",
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "create-admin": "node scripts/create-admin.js",
+    "test": "node --test --test-force-exit tests/api.test.js"
   },
   "keywords": [],
   "author": "",
@@ -16,11 +22,11 @@
     "express": "^5.1.0",
     "express-validator": "^7.3.0",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^2.2.0",
-    "mysql2": "^3.15.3",
-    "sequelize": "^6.37.7"
+    "mongoose": "^8.24.4",
+    "multer": "^2.2.0"
   },
   "devDependencies": {
+    "mongodb-memory-server": "^10.4.3",
     "nodemon": "^3.1.11"
   }
 }

@@ -1,42 +1,48 @@
-const { DataTypes } = require('sequelize');
+const mongoose = require('mongoose');
+const { applyIdAndJson } = require('./utils');
 
-module.exports = (sequelize) => {
-  return sequelize.define('User', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+const userSchema = new mongoose.Schema(
+  {
+    _id: { type: Number },
 
-    name: { type: DataTypes.STRING(60), allowNull: false },
+    name: { type: String, required: true, maxlength: 60, trim: true },
 
     email: {
-      type: DataTypes.STRING(100),
-      allowNull: false,
+      type: String,
+      required: true,
       unique: true,
-      validate: { isEmail: true }
+      maxlength: 100,
+      lowercase: true,
+      trim: true
     },
 
-    address: { type: DataTypes.STRING(400) },
+    address: { type: String, maxlength: 400, default: null },
 
-    phone: { type: DataTypes.STRING(40), allowNull: true },
+    phone: { type: String, maxlength: 40, default: null },
 
-    isSuspended: { type: DataTypes.BOOLEAN, defaultValue: false },
+    isSuspended: { type: Boolean, default: false },
 
-    password: { type: DataTypes.STRING, allowNull: false },
+    password: { type: String, required: true },
 
-    dateOfBirth: { type: DataTypes.DATEONLY, allowNull: true },
+    dateOfBirth: { type: String, default: null }, // 'YYYY-MM-DD' (same as before)
 
-    profilePhoto: { type: DataTypes.STRING(500), allowNull: true },
+    profilePhoto: { type: String, maxlength: 500, default: null },
 
     // Bumped to invalidate every issued JWT (sign-out of all devices)
-    tokenVersion: { type: DataTypes.INTEGER, defaultValue: 0 },
+    tokenVersion: { type: Number, default: 0 },
 
     // Notification / location / appearance / preference settings
-    settings: { type: DataTypes.JSON, allowNull: true },
+    settings: { type: Object, default: {} },
 
-    role: {
-      type: DataTypes.ENUM('admin', 'user', 'owner'),
-      defaultValue: 'user'
-    }
-  }, {
-    tableName: 'users',
-    timestamps: true
-  });
-};
+    // Guest demo accounts (Login page "continue as guest") expire automatically
+    isGuest: { type: Boolean, default: false },
+    guestExpiresAt: { type: Date, default: null },
+
+    role: { type: String, enum: ['admin', 'user', 'owner'], default: 'user' }
+  },
+  { timestamps: true, minimize: false }
+);
+
+applyIdAndJson(userSchema, 'users');
+
+module.exports = mongoose.models.User || mongoose.model('User', userSchema);

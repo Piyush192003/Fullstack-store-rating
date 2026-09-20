@@ -1,30 +1,28 @@
-const { DataTypes } = require('sequelize');
+const mongoose = require('mongoose');
+const { applyIdAndJson } = require('./utils');
 
-module.exports = (sequelize) => {
-  return sequelize.define('Rating', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+const ratingSchema = new mongoose.Schema(
+  {
+    _id: { type: Number },
 
-    rating: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      validate: { min: 1, max: 5 }
-    },
+    rating: { type: Number, required: true, min: 1, max: 5 },
 
-    review: { type: DataTypes.TEXT, allowNull: true },
+    review: { type: String, default: null },
 
-    ownerReply: { type: DataTypes.TEXT, allowNull: true },
+    ownerReply: { type: String, default: null },
 
-    isFlagged: { type: DataTypes.BOOLEAN, defaultValue: false },
+    isFlagged: { type: Boolean, default: false },
 
-    userId: { type: DataTypes.INTEGER, allowNull: false },
+    userId: { type: Number, required: true, index: true },
 
-    storeId: { type: DataTypes.INTEGER, allowNull: false }
+    storeId: { type: Number, required: true, index: true }
+  },
+  { timestamps: true }
+);
 
-  }, {
-    tableName: 'ratings',
-    timestamps: true,
-    indexes: [
-      { unique: true, fields: ['userId', 'storeId'] }
-    ]
-  });
-};
+// One rating per user per store (same as the old SQL unique index)
+ratingSchema.index({ userId: 1, storeId: 1 }, { unique: true });
+
+applyIdAndJson(ratingSchema, 'ratings');
+
+module.exports = mongoose.models.Rating || mongoose.model('Rating', ratingSchema);

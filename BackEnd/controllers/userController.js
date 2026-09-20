@@ -1,5 +1,8 @@
-const { Store, Rating, Category, ReviewHelp, User, Favorite, Notification } = require('../models');
-const { Op } = require('sequelize');
+const { Store, Rating, Category, ReviewHelp, User, Favorite, Notification, deleteStoreCascade } = require('../models');
+
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const likeRe = (q) => new RegExp(escapeRegex(q), 'i');
+const SORT_COLLATION = { locale: 'en', strength: 2 }; // case-insensitive, like MySQL
 
 function distribution(ratings) {
   const dist = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -24,6 +27,7 @@ exports.getProfile = async (req, res) => {
       address: req.user.address,
       phone: req.user.phone,
       role: req.user.role,
+      isGuest: !!req.user.isGuest,
       createdAt: req.user.createdAt
     }
   });
@@ -32,31 +36,31 @@ exports.getProfile = async (req, res) => {
 // Get list of stores for user with filters, aggregation, and rating distribution
 exports.listStores = async (req, res) => {
   const { q, category, price, sortBy = 'name', order = 'ASC' } = req.query;
-  const safeOrder = order === 'DESC' ? 'DESC' : 'ASC';
 
-  const where = { isApproved: true, isSuspended: false };
+  const filter = { isApproved: true, isSuspended: false };
   if (q) {
-    where[Op.or] = [
-      { name: { [Op.like]: `%${q}%` } },
-      { address: { [Op.like]: `%${q}%` } }
+    filter.$or = [
+      { name: likeRe(q) },
+      { address: likeRe(q) }
     ];
   }
-  if (category) where.categoryId = Number(category);
-  if (price) where.priceLevel = Number(price);
+  if (category) filter.categoryId = Number(category);
+  if (price) filter.priceLevel = Number(price);
 
-  const stores = await Store.findAll({
-    where,
-    include: [
-      { model: Rating, as: 'Ratings' },
-      { model: Category }
-    ]
-  });
+  const stores = await Store.find(filter).collation(SORT_COLLATION).sort({ name: 1 });
+
+  const [ratings, categories] = await Promise.all([
+    Rating.find({ storeId: { $in: stores.map((s) => s.id) } }).select('storeId userId rating review'),
+    Category.find().select('name')
+  ]);
+
+  const catName = Object.fromEntries(categories.map((c) => [c.id, c.name]));
 
   const result = stores
     .map((s) => {
-      const ratings = s.Ratings || [];
-      const avg = ratings.length ? ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length : null;
-      const userRating = ratings.find((r) => r.userId === req.user.id);
+      const storeRatings = ratings.filter((r) => r.storeId === s.id);
+      const avg = storeRatings.length ? storeRatings.reduce((sum, r) => sum + r.rating, 0) / storeRatings.length : null;
+      const userRating = storeRatings.find((r) => r.userId === req.user.id);
       return {
         id: s.id,
         name: s.name,
@@ -65,11 +69,11 @@ exports.listStores = async (req, res) => {
         description: s.description,
         openingHours: s.openingHours,
         priceLevel: s.priceLevel,
-        category: s.Category ? s.Category.name : null,
+        category: s.categoryId ? catName[s.categoryId] || null : null,
         categoryId: s.categoryId,
         avgRating: avg,
-        ratingCount: ratings.length,
-        distribution: distribution(ratings),
+        ratingCount: storeRatings.length,
+        distribution: distribution(storeRatings),
         userRating: userRating ? { rating: userRating.rating, review: userRating.review, ratingId: userRating.id } : null
       };
     })
@@ -88,12 +92,7 @@ exports.listStores = async (req, res) => {
 // Get one store with a full review list
 exports.getStore = async (req, res) => {
   try {
-    const store = await Store.findByPk(req.params.id, {
-      include: [
-        { model: Category },
-        { model: Rating, as: 'Ratings', include: [{ model: ReviewHelp }, { model: User }] }
-      ]
-    });
+    const store = await Store.findById(req.params.id);
 
     // Hidden stores are invisible to normal users (admins may preview them)
     const hidden = !store || !store.isApproved || store.isSuspended;
@@ -102,7 +101,18 @@ exports.getStore = async (req, res) => {
     if (!store)
       return res.status(404).json({ message: 'Store not found' });
 
-    const ratings = store.Ratings || [];
+    const ratings = await Rating.find({ storeId: store.id });
+
+    const [category, helps, users] = await Promise.all([
+      store.categoryId ? Category.findById(store.categoryId) : Promise.resolve(null),
+      ReviewHelp.find({ ratingId: { $in: ratings.map((r) => r.id) } }).select('ratingId userId'),
+      User.find({ _id: { $in: [...new Set(ratings.map((r) => r.userId))] } }).select('name')
+    ]);
+
+    const userName = Object.fromEntries(users.map((u) => [u.id, u.name]));
+    const helpsByRating = {};
+    helps.forEach((h) => { (helpsByRating[h.ratingId] = helpsByRating[h.ratingId] || []).push(h); });
+
     const avg = ratings.length ? ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length : null;
 
     const reviews = ratings
@@ -113,8 +123,8 @@ exports.getStore = async (req, res) => {
         ownerReply: r.ownerReply,
         isFlagged: r.isFlagged,
         createdAt: r.createdAt,
-        user: r.User ? { id: r.User.id, name: r.User.name } : null,
-        helpful: helpfulInfo(r.ReviewHelps, req.user.id)
+        user: userName[r.userId] ? { id: r.userId, name: userName[r.userId] } : null,
+        helpful: helpfulInfo(helpsByRating[r.id], req.user.id)
       }))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
@@ -128,7 +138,7 @@ exports.getStore = async (req, res) => {
         description: store.description,
         openingHours: store.openingHours,
         priceLevel: store.priceLevel,
-        category: store.Category ? store.Category.name : null,
+        category: category ? category.name : null,
         images: Array.isArray(store.images) ? store.images : []
       },
       avgRating: avg,
@@ -140,7 +150,6 @@ exports.getStore = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
-
 
 // Submit or update rating and review for a store
 exports.submitRating = async (req, res) => {
@@ -155,13 +164,11 @@ exports.submitRating = async (req, res) => {
   if (review !== undefined && typeof review === 'string' && review.length > 4000)
     return res.status(400).json({ message: 'Review must be under 4000 characters' });
 
-  const store = await Store.findByPk(storeId);
+  const store = await Store.findById(storeId);
   if (!store)
     return res.status(404).json({ message: 'Store not found' });
 
-  let existing = await Rating.findOne({
-    where: { userId: req.user.id, storeId }
-  });
+  let existing = await Rating.findOne({ userId: req.user.id, storeId: store.id });
 
   if (existing) {
     existing.rating = rating;
@@ -172,7 +179,7 @@ exports.submitRating = async (req, res) => {
 
   const newRating = await Rating.create({
     userId: req.user.id,
-    storeId,
+    storeId: store.id,
     rating,
     review: review || null
   });
@@ -183,22 +190,23 @@ exports.submitRating = async (req, res) => {
 // Delete own rating/review for a store
 exports.deleteRating = async (req, res) => {
   const { storeId } = req.params;
-  const deleted = await Rating.destroy({
-    where: { userId: req.user.id, storeId }
-  });
-  if (!deleted) return res.status(404).json({ message: 'Rating not found' });
+  const deleted = await Rating.deleteOne({ userId: req.user.id, storeId });
+  if (!deleted.deletedCount) return res.status(404).json({ message: 'Rating not found' });
   res.json({ message: 'Rating deleted' });
 };
 
 // Toggle helpful vote on a review
 exports.toggleHelpful = async (req, res) => {
   const ratingId = Number(req.params.ratingId);
-  const rating = await Rating.findByPk(ratingId);
+  if (!Number.isInteger(ratingId))
+    return res.status(404).json({ message: 'Review not found' });
+
+  const rating = await Rating.findById(ratingId);
   if (!rating) return res.status(404).json({ message: 'Review not found' });
 
-  const existing = await ReviewHelp.findOne({ where: { ratingId, userId: req.user.id } });
+  const existing = await ReviewHelp.findOne({ ratingId, userId: req.user.id });
   if (existing) {
-    await existing.destroy();
+    await existing.deleteOne();
     return res.json({ message: 'Removed helpful', helpful: false });
   }
   await ReviewHelp.create({ ratingId, userId: req.user.id });
@@ -206,10 +214,10 @@ exports.toggleHelpful = async (req, res) => {
   // Notify the review author when someone likes their review (respect their prefs)
   if (rating.userId && rating.userId !== req.user.id) {
     try {
-      const author = await User.findByPk(rating.userId);
+      const author = await User.findById(rating.userId);
       const prefs = (author && author.settings && author.settings.notif) || {};
       if (prefs.likes !== false) {
-        const store = await Store.findByPk(rating.storeId, { attributes: ['name'] });
+        const store = await Store.findById(rating.storeId).select('name');
         await Notification.create({
           userId: rating.userId,
           title: 'Someone liked your review',
@@ -241,24 +249,28 @@ exports.changePassword = async (req, res) => {
 // ---------- My Ratings & Reviews ----------
 exports.myReviews = async (req, res) => {
   try {
-    const ratings = await Rating.findAll({
-      where: { userId: req.user.id },
-      include: [{ model: Store, attributes: ['id', 'name', 'address', 'images'] }],
-      order: [['createdAt', 'DESC']]
-    });
-    res.json(ratings.map((r) => ({
-      id: r.id,
-      rating: r.rating,
-      review: r.review,
-      ownerReply: r.ownerReply,
-      createdAt: r.createdAt,
-      store: r.Store ? {
-        id: r.Store.id,
-        name: r.Store.name,
-        address: r.Store.address,
-        images: Array.isArray(r.Store.images) ? r.Store.images : []
-      } : null
-    })));
+    const ratings = await Rating.find({ userId: req.user.id }).sort({ createdAt: -1 });
+
+    const stores = await Store.find({ _id: { $in: [...new Set(ratings.map((r) => r.storeId))] } })
+      .select('name address images');
+    const storeById = Object.fromEntries(stores.map((s) => [s.id, s]));
+
+    res.json(ratings.map((r) => {
+      const s = storeById[r.storeId];
+      return {
+        id: r.id,
+        rating: r.rating,
+        review: r.review,
+        ownerReply: r.ownerReply,
+        createdAt: r.createdAt,
+        store: s ? {
+          id: s.id,
+          name: s.name,
+          address: s.address,
+          images: Array.isArray(s.images) ? s.images : []
+        } : null
+      };
+    }));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -267,7 +279,7 @@ exports.myReviews = async (req, res) => {
 // ---------- Favorites ----------
 exports.favoriteIds = async (req, res) => {
   try {
-    const rows = await Favorite.findAll({ where: { userId: req.user.id }, attributes: ['storeId'] });
+    const rows = await Favorite.find({ userId: req.user.id }).select('storeId');
     res.json(rows.map((r) => r.storeId));
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -276,25 +288,29 @@ exports.favoriteIds = async (req, res) => {
 
 exports.listFavorites = async (req, res) => {
   try {
-    const favs = await Favorite.findAll({
-      where: { userId: req.user.id },
-      include: [{ model: Store, include: [Rating, Category] }],
-      order: [['createdAt', 'DESC']]
-    });
-    res.json(favs.filter((f) => f.Store).map((f) => {
-      const s = f.Store;
-      const ratings = s.Ratings || [];
-      const avg = ratings.length ? ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length : null;
-      const mine = ratings.find((r) => r.userId === req.user.id);
+    const favs = await Favorite.find({ userId: req.user.id }).sort({ createdAt: -1 });
+
+    const stores = await Store.find({ _id: { $in: favs.map((f) => f.storeId) } });
+    const ratings = await Rating.find({ storeId: { $in: favs.map((f) => f.storeId) } }).select('storeId userId rating');
+    const categories = await Category.find().select('name');
+
+    const storeById = Object.fromEntries(stores.map((s) => [s.id, s]));
+    const catName = Object.fromEntries(categories.map((c) => [c.id, c.name]));
+
+    res.json(favs.filter((f) => storeById[f.storeId]).map((f) => {
+      const s = storeById[f.storeId];
+      const storeRatings = ratings.filter((r) => r.storeId === s.id);
+      const avg = storeRatings.length ? storeRatings.reduce((sum, r) => sum + r.rating, 0) / storeRatings.length : null;
+      const mine = storeRatings.find((r) => r.userId === req.user.id);
       return {
         id: s.id,
         name: s.name,
         address: s.address,
         priceLevel: s.priceLevel,
         images: Array.isArray(s.images) ? s.images : [],
-        category: s.Category ? s.Category.name : null,
+        category: s.categoryId ? catName[s.categoryId] || null : null,
         avgRating: avg,
-        ratingCount: ratings.length,
+        ratingCount: storeRatings.length,
         userRating: mine ? { rating: mine.rating } : null
       };
     }));
@@ -306,12 +322,12 @@ exports.listFavorites = async (req, res) => {
 exports.toggleFavorite = async (req, res) => {
   try {
     const storeId = Number(req.params.storeId);
-    const store = await Store.findByPk(storeId);
+    const store = await Store.findById(storeId);
     if (!store) return res.status(404).json({ message: 'Store not found' });
 
-    const existing = await Favorite.findOne({ where: { userId: req.user.id, storeId } });
+    const existing = await Favorite.findOne({ userId: req.user.id, storeId });
     if (existing) {
-      await existing.destroy();
+      await existing.deleteOne();
       return res.json({ favorited: false, message: 'Removed from favorites' });
     }
     await Favorite.create({ userId: req.user.id, storeId });
@@ -324,11 +340,9 @@ exports.toggleFavorite = async (req, res) => {
 // ---------- Notifications ----------
 exports.getNotifications = async (req, res) => {
   try {
-    const items = await Notification.findAll({
-      where: { userId: req.user.id },
-      order: [['createdAt', 'DESC']],
-      limit: 50
-    });
+    const items = await Notification.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(50);
     res.json({ items, unread: items.filter((n) => !n.isRead).length });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -337,10 +351,9 @@ exports.getNotifications = async (req, res) => {
 
 exports.markNotificationsRead = async (req, res) => {
   try {
-    await Notification.update({ isRead: true }, { where: { userId: req.user.id, isRead: false } });
+    await Notification.updateMany({ userId: req.user.id, isRead: false }, { $set: { isRead: true } });
     res.json({ message: 'All notifications marked as read' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
-

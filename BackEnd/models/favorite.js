@@ -1,13 +1,18 @@
-const { DataTypes } = require('sequelize');
+const mongoose = require('mongoose');
+const { applyIdAndJson } = require('./utils');
 
-module.exports = (sequelize) => {
-  return sequelize.define('Favorite', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    userId: { type: DataTypes.INTEGER, allowNull: false },
-    storeId: { type: DataTypes.INTEGER, allowNull: false }
-  }, {
-    tableName: 'favorites',
-    timestamps: true,
-    indexes: [{ unique: true, fields: ['userId', 'storeId'] }]
-  });
-};
+const favoriteSchema = new mongoose.Schema(
+  {
+    _id: { type: Number },
+
+    userId: { type: Number, required: true, index: true },
+    storeId: { type: Number, required: true, index: true }
+  },
+  { timestamps: true }
+);
+
+favoriteSchema.index({ userId: 1, storeId: 1 }, { unique: true });
+
+applyIdAndJson(favoriteSchema, 'favorites');
+
+module.exports = mongoose.models.Favorite || mongoose.model('Favorite', favoriteSchema);

@@ -1,8 +1,24 @@
-const { User, Store } = require('../models');
+const { User, Store, Category, deleteUserCascade } = require('../models');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { validationResult } = require('express-validator');
 require('dotenv').config();
+
+const signToken = (user) =>
+  jwt.sign(
+    { id: user.id, tv: user.tokenVersion || 0 },
+    process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+
+const publicUser = (user) => ({
+  id: user.id,
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  isGuest: !!user.isGuest
+});
 
 exports.register = async (req, res) => {
   const errors = validationResult(req);
@@ -19,7 +35,7 @@ exports.register = async (req, res) => {
       let requester = null;
       try {
         const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
-        requester = await User.findByPk(decoded.id);
+        requester = await User.findById(decoded.id);
       } catch {}
       if (!requester || requester.role !== 'admin')
         return res.status(403).json({ message: 'Not allowed. Administrator accounts can only be created by an existing administrator.' });
@@ -28,7 +44,9 @@ exports.register = async (req, res) => {
     // Sanitize role — public signups may only become a customer or a store owner
     if (!['user', 'owner'].includes(role)) role = 'user';
 
-    const existing = await User.findOne({ where: { email } });
+    email = String(email).trim().toLowerCase();
+
+    const existing = await User.findOne({ email });
     if (existing)
       return res.status(400).json({ message: 'Email already in use' });
 
@@ -53,14 +71,16 @@ exports.register = async (req, res) => {
       });
     }
 
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = signToken(user);
 
     return res.json({
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role }
+      user: publicUser(user)
     });
 
   } catch (err) {
+    if (err && err.code === 11000)
+      return res.status(400).json({ message: 'Email already in use' });
     return res.status(500).json({ message: err.message });
   }
 };
@@ -69,7 +89,7 @@ exports.login = async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    const user = await User.findOne({ where: { email } });
+    const user = await User.findOne({ email: String(email).trim().toLowerCase() });
     if (!user)
       return res.status(400).json({ message: 'Invalid credentials' });
 
@@ -80,13 +100,71 @@ exports.login = async (req, res) => {
     if (user.isSuspended)
       return res.status(403).json({ message: 'This account has been suspended. Contact support.' });
 
-    const token = jwt.sign({ id: user.id, tv: user.tokenVersion || 0 }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = signToken(user);
 
     return res.json({
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role }
+      user: publicUser(user)
     });
 
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ---------- GUEST LOGIN ----------
+// Creates a one-click temporary demo account (user or owner) so anyone can try
+// the app instantly. Guest accounts auto-expire after 24h and are then removed
+// together with their data (stores, ratings, favorites, notifications).
+const GUEST_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function cleanupExpiredGuests() {
+  const expired = await User.find({
+    isGuest: true,
+    guestExpiresAt: { $ne: null, $lt: new Date() }
+  }).select('_id');
+
+  for (const guest of expired) {
+    await deleteUserCascade(guest.id);
+    await User.deleteOne({ _id: guest._id });
+  }
+}
+
+exports.guestLogin = async (req, res) => {
+  try {
+    const role = req.body.role === 'owner' ? 'owner' : 'user';
+
+    // Best-effort housekeeping of expired demo accounts (fire & forget)
+    cleanupExpiredGuests().catch(() => {});
+
+    const suffix = `${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
+    const rawPassword = crypto.randomBytes(24).toString('hex'); // unguessable; guests never sign in manually
+
+    const user = await User.create({
+      name: role === 'owner' ? 'Guest Owner' : 'Guest User',
+      email: `guest.${role}.${suffix}@guest.local`,
+      password: await bcrypt.hash(rawPassword, 10),
+      role,
+      isGuest: true,
+      guestExpiresAt: new Date(Date.now() + GUEST_TTL_MS),
+      address: 'Temporary demo session (expires in 24h)'
+    });
+
+    // Give guest owners a live demo store so their dashboard is fully functional
+    if (role === 'owner') {
+      const category = await Category.findOne().sort({ name: 1 });
+      await Store.create({
+        name: `Guest's Demo Store`,
+        address: '123 Demo Street, Springfield',
+        categoryId: category ? category.id : null,
+        ownerId: user.id,
+        isApproved: true // live immediately so the demo works end-to-end
+      });
+    }
+
+    const token = signToken(user);
+
+    return res.json({ token, user: publicUser(user) });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -103,6 +181,7 @@ exports.me = async (req, res) => {
       address: user.address,
       phone: user.phone,
       role: user.role,
+      isGuest: !!user.isGuest,
       createdAt: user.createdAt,
       dateOfBirth: user.dateOfBirth,
       profilePhoto: user.profilePhoto,
@@ -123,8 +202,9 @@ exports.updateMe = async (req, res) => {
       const clean = String(email).trim().toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean))
         return res.status(400).json({ message: 'Enter a valid email address' });
-      const taken = await User.findOne({ where: { email: clean } });
-      if (taken) return res.status(400).json({ message: 'That email is already in use' });
+      const taken = await User.findOne({ email: clean });
+      if (taken && taken.id !== req.user.id)
+        return res.status(400).json({ message: 'That email is already in use' });
       req.user.email = clean;
     }
     if (name !== undefined) req.user.name = String(name).trim().slice(0, 60);
@@ -135,7 +215,7 @@ exports.updateMe = async (req, res) => {
       else {
         const d = new Date(dateOfBirth);
         if (isNaN(d.getTime())) return res.status(400).json({ message: 'Invalid date of birth' });
-        req.user.dateOfBirth = dateOfBirth;
+        req.user.dateOfBirth = String(dateOfBirth).slice(0, 10);
       }
     }
     // Deep-merge so each settings section can save independently
@@ -152,6 +232,7 @@ exports.updateMe = async (req, res) => {
         phone: req.user.phone,
         address: req.user.address,
         role: req.user.role,
+        isGuest: !!req.user.isGuest,
         createdAt: req.user.createdAt,
         dateOfBirth: req.user.dateOfBirth,
         profilePhoto: req.user.profilePhoto,
@@ -159,6 +240,8 @@ exports.updateMe = async (req, res) => {
       }
     });
   } catch (err) {
+    if (err && err.code === 11000)
+      return res.status(400).json({ message: 'That email is already in use' });
     return res.status(500).json({ message: err.message });
   }
 };
@@ -187,7 +270,7 @@ exports.logoutAllDevices = async (req, res) => {
   try {
     req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
     await req.user.save();
-    const token = jwt.sign({ id: req.user.id, tv: req.user.tokenVersion }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = signToken(req.user);
     return res.json({ message: 'Signed out of all other devices.', token });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -201,10 +284,14 @@ exports.deleteMe = async (req, res) => {
     if (req.user.role === 'admin')
       return res.status(403).json({ message: 'Administrator accounts cannot be deleted from Settings.' });
     const { password } = req.body;
-    if (!password) return res.status(400).json({ message: 'Enter your password to confirm.' });
-    const ok = await bcrypt.compare(password, req.user.password);
-    if (!ok) return res.status(401).json({ message: 'Incorrect password.' });
-    await req.user.destroy();
+    if (!password && !req.user.isGuest)
+      return res.status(400).json({ message: 'Enter your password to confirm.' });
+    if (!req.user.isGuest) {
+      const ok = await bcrypt.compare(password, req.user.password);
+      if (!ok) return res.status(401).json({ message: 'Incorrect password.' });
+    }
+    await deleteUserCascade(req.user.id);
+    await req.user.deleteOne();
     return res.json({ message: 'Your account has been permanently deleted.' });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -215,21 +302,34 @@ exports.deleteMe = async (req, res) => {
 exports.exportMyData = async (req, res) => {
   try {
     const { Rating, Favorite, Store } = require('../models');
-    void Rating; void Favorite; void Store;
-    const reviews = await Rating.findAll({
-      where: { userId: req.user.id },
-      include: [{ model: Store, attributes: ['id', 'name'] }]
-    });
-    const favorites = await Favorite.findAll({
-      where: { userId: req.user.id },
-      include: [{ model: Store, attributes: ['id', 'name'] }]
-    });
+    const ratings = await Rating.find({ userId: req.user.id });
+    const favorites = await Favorite.find({ userId: req.user.id });
+
+    const storeIds = [...ratings.map((r) => r.storeId), ...favorites.map((f) => f.storeId)];
+    const stores = await Store.find({ _id: { $in: [...new Set(storeIds)] } }).select('name');
+    const storeName = Object.fromEntries(stores.map((s) => [s.id, s.name]));
+
     const payload = {
       exportedAt: new Date().toISOString(),
-      profile: { id: req.user.id, name: req.user.name, email: req.user.email, phone: req.user.phone, address: req.user.address, role: req.user.role, dateOfBirth: req.user.dateOfBirth, createdAt: req.user.createdAt },
+      profile: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        phone: req.user.phone,
+        address: req.user.address,
+        role: req.user.role,
+        dateOfBirth: req.user.dateOfBirth,
+        createdAt: req.user.createdAt
+      },
       settings: req.user.settings || {},
-      reviews: reviews.map((r) => ({ rating: r.rating, review: r.review, ownerReply: r.ownerReply, createdAt: r.createdAt, store: r.Store ? r.Store.name : null })),
-      favorites: favorites.map((f) => f.Store ? f.Store.name : null)
+      reviews: ratings.map((r) => ({
+        rating: r.rating,
+        review: r.review,
+        ownerReply: r.ownerReply,
+        createdAt: r.createdAt,
+        store: storeName[r.storeId] || null
+      })),
+      favorites: favorites.map((f) => storeName[f.storeId] || null)
     };
     res.setHeader('Content-Disposition', 'attachment; filename="storescope-my-data.json"');
     res.setHeader('Content-Type', 'application/json');

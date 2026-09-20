@@ -1,40 +1,52 @@
 import { useState } from "react";
-import axios from "axios";
 import { Link, useNavigate } from "react-router-dom";
+import api from "../utils/api";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [guestLoading, setGuestLoading] = useState("");
 
   const navigate = useNavigate();
+
+  const afterAuth = ({ user, token }) => {
+    // Save token + identity
+    localStorage.setItem("token", token);
+    localStorage.setItem("role", user.role);
+    localStorage.setItem("uid", String(user.id));
+    localStorage.setItem("userName", user.name);
+
+    // Redirect based on role
+    if (user.role === "admin") navigate("/admin/dashboard");
+    else if (user.role === "owner") navigate("/owner/dashboard");
+    else navigate("/user/dashboard");
+  };
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setError("");
 
     try {
-      const res = await axios.post("http://localhost:5000/api/auth/login", {
-        email,
-        password,
-      });
-
-      const { user, token } = res.data;
-
-      // Save token + identity
-      localStorage.setItem("token", token);
-      localStorage.setItem("role", user.role);
-      localStorage.setItem("uid", String(user.id));
-      localStorage.setItem("userName", user.name);
-
-      // Redirect based on role
-      if (user.role === "admin") navigate("/admin/dashboard");
-      else if (user.role === "owner") navigate("/owner/dashboard");
-      else navigate("/user/dashboard");
-
+      const res = await api.post("/auth/login", { email, password });
+      afterAuth(res.data);
     } catch (err) {
       const validationError = err.response?.data?.errors?.[0]?.msg;
       setError(validationError || err.response?.data?.message || "Login failed");
+    }
+  };
+
+  // One-click demo login — a temporary account (auto-deleted after 24h)
+  const handleGuestLogin = async (role) => {
+    setError("");
+    setGuestLoading(role);
+    try {
+      const res = await api.post("/auth/guest-login", { role });
+      afterAuth(res.data);
+    } catch (err) {
+      setError(err.response?.data?.message || "Guest login failed. Please try again.");
+    } finally {
+      setGuestLoading("");
     }
   };
 
@@ -72,6 +84,36 @@ export default function Login() {
         >
           Login
         </button>
+
+        {/* Guest demo logins */}
+        <div className="guest-divider" style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 12px" }}>
+          <span style={{ flex: 1, height: 1, background: "#e2e8f0" }} />
+          <span className="muted" style={{ fontSize: 12 }}>or try instantly as a guest</span>
+          <span style={{ flex: 1, height: 1, background: "#e2e8f0" }} />
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            type="button"
+            className="guest-btn"
+            disabled={!!guestLoading}
+            onClick={() => handleGuestLogin("user")}
+            style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: "#f8fafc", fontWeight: 600, cursor: "pointer" }}
+          >
+            {guestLoading === "user" ? "Starting…" : "👤 Login as Guest User"}
+          </button>
+          <button
+            type="button"
+            className="guest-btn"
+            disabled={!!guestLoading}
+            onClick={() => handleGuestLogin("owner")}
+            style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid #cbd5e1", background: "#f8fafc", fontWeight: 600, cursor: "pointer" }}
+          >
+            {guestLoading === "owner" ? "Starting…" : "🏪 Login as Guest Owner"}
+          </button>
+        </div>
+        <p className="muted" style={{ fontSize: 12, marginTop: 8, textAlign: "center" }}>
+          Guest sessions are temporary and removed automatically after 24 hours.
+        </p>
 
         <p className="muted" style={{ marginTop: 20 }}>
           Don't have an account?{" "}

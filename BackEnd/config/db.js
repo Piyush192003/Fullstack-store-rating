@@ -1,15 +1,23 @@
-const { Sequelize } = require('sequelize');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
-const sequelize = new Sequelize(
-  process.env.DB_NAME,
-  process.env.DB_USER,
-  process.env.DB_PASSWORD,
-  {
-    host: process.env.DB_HOST || 'localhost',
-    dialect: 'mysql',
-    logging: false
-  }
-);
+const MONGODB_URI =
+  process.env.MONGODB_URI ||
+  process.env.MONGO_URL ||
+  'mongodb://127.0.0.1:27017/store_rating_db';
 
-module.exports = sequelize;
+let connected = false;
+
+async function connectDB() {
+  if (connected) return mongoose.connection;
+  mongoose.set('strictQuery', true);
+  await mongoose.connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 15000,
+    autoIndex: true
+  });
+  connected = true;
+  console.log('MongoDB connected');
+  return mongoose.connection;
+}
+
+module.exports = { connectDB, mongoose, MONGODB_URI };

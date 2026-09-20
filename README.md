@@ -1,133 +1,140 @@
-# StoreScope — Full-Stack Store Rating Platform
-
-A store discovery & rating web app with three roles: **Users**, **Store Owners**, and **Admins**.
+# StoreScope — Fullstack Store Rating App
 
 - **Frontend:** React 19 + Vite + Tailwind CSS
-- **Backend:** Node.js + Express 5 + Sequelize ORM (MySQL 8)
-- **Auth:** JWT (bcrypt-hashed passwords) + role-based access control
-
-## ✨ Features
-
-- **User** — search / filter (category, price, rating) & sort stores, 1–5★ ratings with written reviews, update/delete own review, "helpful" votes, favorites, nearby discovery, in-app notifications, theme & preferences.
-- **Store Owner** – register/claim a store, edit profile (hours, price, photos), upload/remove images, view ratings, reply publicly to reviews, report abusive reviews.
-- **Admin** – dashboard statistics, create accounts, suspend users, add/edit/approve/suspend/reject stores, manage categories, and moderate owner-flagged reviews.
+- **Backend:** Node.js + Express 5 + Mongoose (MongoDB)
+- **Auth:** JWT (bcrypt-hashed passwords) + role-based access control + one-click guest logins
 
 ---
 
-## ✨ Project structure
+## Deployment topology
 
-```
-fullstack-store-rating/
-├── BackEnd/            # Express API
-│   ├── config/         # Sequelize/MySQL connection
-│   ├── controllers/    # auth, admin, owner, user, category
-│   ├── middleware/     # auth guard, role guard, upload
-│   ├── models/         # Store, User, Rating, ReviewHelp, Favorite, Notification, Category
-│   ├── routes/         # /api/auth, /api/user, /api/owner, /api/admin, /api/categories
-│   ├── scripts/        # unlock-user.js, delete-user.js
-│   ├── uploads/        # store photos (git-ignored)
-│   ├── .env.example    # copy to .env and edit
-│   └── package.json
-└── FrontEnd/
-    └── myapp/          # React + Vite app
-        ├── src/
-        └── package.json
-```
+| Piece    | Host          | Notes                                          |
+|----------|---------------|------------------------------------------------|
+| Frontend | **Vercel**    | Root `vercel.json` builds `FrontEnd/myapp`     |
+| Backend  | **Heroku**    | `BackEnd/Procfile` → `web: node index.js`      |
+| Database | **MongoDB Atlas** | Free M0 cluster is enough to start         |
 
 ---
 
-## 🖥 Requirements
+## 1. MongoDB Atlas (do this first)
 
-| Tool | Version |
-|---|---|
-| Node.js | 18+ recommended (uses Express 5 / React 19) |
-| MySQL | 8.x |
+1. Create a free account at <https://cloud.mongodb.com> → build an **M0 (free)** cluster.
+2. **Database Access** → add a database user (username + password). Save them.
+3. **Network Access** → add IP rule `0.0.0.0/0` (Allow from anywhere) — required for Heroku.
+4. Get the connection string: **Connect → Drivers**, it looks like:
+   `mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`
+5. Add the database name before the `?`: `...mongodb.net/store_rating_db?retryWrites=true...`
+   Collections + indexes are created automatically on first start.
 
 ---
 
-## 🚀 Getting started (manual run)
+## 2. Heroku backend
 
-### 1. Clone / extract & open the folder
+From the `BackEnd` folder:
 
 ```bash
-git clone https://github.com/<you>/fullstack-store-rating.git
-cd fullstack-store-rating
+heroku login
+heroku create storescope-api            # pick any unique name
+heroku git:remote -a storescope-api
+
+# Required config vars
+heroku config:set MONGODB_URI="mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/store_rating_db?retryWrites=true&w=majority"
+heroku config:set JWT_SECRET="$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")"
+heroku config:set FRONTEND_URL="https://<your-vercel-app>.vercel.app"   # set after step 3
+
+git subtree push --prefix BackEnd heroku main
+# (or, from inside BackEnd with its own git repo: git push heroku main)
 ```
 
-### 2. Create the database + config
-
-Open your MySQL client and run:
-
-```sql
-CREATE DATABASE IF NOT EXISTS store_rating_db;
-```
-
-Then create your backend config file:
+Create the first admin account (there is no auto-seeding):
 
 ```bash
-cp BackEnd/.env.example BackEnd/.env
+# One-off dyno on Heroku:
+heroku run "node scripts/create-admin.js admin@example.com 'YourStrongPass' 'Admin'"
 ```
 
-Edit `BackEnd/.env` and set your real MySQL password:
+Verify: `https://<your-api>.herokuapp.com/api/health` → `{"ok":true}`
 
+> Note: images upload to the dyno's ephemeral disk — they reset on each deploy/restart.
+> For permanent image storage, plug in Cloudinary/S3 later.
+
+---
+
+## 3. Vercel frontend
+
+1. Import the GitHub repo into Vercel — `vercel.json` at the repo root auto-detects
+   `FrontEnd/myapp`, builds it and enables SPA routing.
+2. In **Project → Settings → Environment Variables** add:
+
+   | Name           | Value                                             |
+   |----------------|---------------------------------------------------|
+   | `VITE_API_URL` | `https://<your-api>.herokuapp.com/api`            |
+
+3. Redeploy (Deployments → ⋯ → Redeploy) so the variable is baked into the build.
+4. Go back to Heroku and make sure `FRONTEND_URL` matches your Vercel URL.
+
+---
+
+## 4. Environment variables summary
+
+**Heroku (backend)**
+
+| Var            | Value                                        |
+|----------------|----------------------------------------------|
+| `MONGODB_URI`  | Atlas connection string incl. db name        |
+| `JWT_SECRET`   | long random string                           |
+| `FRONTEND_URL` | your Vercel URL (CORS allow-list)            |
+
+**Vercel (frontend)**
+
+| Var            | Value                                        |
+|----------------|----------------------------------------------|
+| `VITE_API_URL` | `https://<your-api>.herokuapp.com/api`       |
+
+---
+
+## Guest login feature
+
+The login page has two extra buttons: **👤 Login as Guest User** and
+**🏪 Login as Guest Owner** (`POST /api/auth/guest-login`).
+
+- Creates a temporary account instantly — no email/password needed.
+- Guest **owners** get a live demo store pre-created so the owner dashboard works end-to-end.
+- Guest accounts are flagged `isGuest: true` and **auto-expire after 24h**;
+  expired guests and all their data (store, ratings, favorites, notifications)
+  are cleaned up automatically on the next guest login.
+
+---
+
+## Local development
+
+```bash
+# Backend (needs a local MongoDB or a local .env pointing at Atlas)
+cd BackEnd
+cp .env.example .env         # set MONGODB_URI
+npm install
+npm run dev                  # http://localhost:5000/api
+
+# Frontend
+cd FrontEnd/myapp
+npm install
+npm run dev                  # http://localhost:5173
 ```
-PORT=5000
-DB_HOST=127.0.0.1
-DB_USER=root
-DB_PASSWORD=your_mysql_password_here
-DB_NAME=store_rating_db
-JWT_SECRET=change_this_to_a_long_random_secret
-```
 
-> The app auto-creates/updates **tables** on startup, but the **database** itself must exist first.
-
-### 3. Start the backend
+## Tests
 
 ```bash
 cd BackEnd
-npm install
-node index.js
+npm test    # spins up an in-memory MongoDB, no setup needed
 ```
-
-Expected output:
-```
-DB connected
-Server running on port 5000
-```
-
-### 4. Start the frontend
-
-```bash
-cd FrontEnd/myapp
-npm install
-npm run dev
-```
-
-Expected: `Local: http://localhost:5173/`
-
-> ⚠️ The frontend runs from `FrontEnd/myapp` (it has `package.json`). Running `npm run dev` from `FrontEnd` alone fails with `Missing script: "dev"`.
-
-### 5. Open the app
-
-- UI: **http://localhost:5173/**
-- API: **http://localhost:5000/api**
-
-Register the first account at `http://localhost:5173/register`. There is **no seeded admin** — to promote an account to admin, either use `BackEnd/scripts/unlock-user.js` or set `role='admin'` for that email directly in MySQL.
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
-| Symptom | Fix |
+| Problem | Fix |
 |---|---|
-| `npm error Missing script: "dev"` | Start the frontend from `FrontEnd/myapp`, not `FrontEnd`. |
-| `Unable to start server` / `SequelizeAuthenticationError` | MySQL isn't running, `.env` password is wrong, or the DB isn't created. |
-| `vite: command not found` | Run `npm install` inside the app folder first. |
-| Login works but no data | Backend isn't running on port 5000, or `FrontEnd/myapp/src/utils/api.js` baseURL doesn't match. |
-| Port 5000 is busy | Change `PORT` in `BackEnd/.env` **and** `baseURL` in `FrontEnd/myapp/src/utils/api.js`. |
-
----
-
-## 🔒 Security note
-
-`.gitignore` excludes `node_modules/`, `BackEnd/.env`, `BackEnd/uploads/`, and `*.log`. Always push the `.env.example` template (never your real `.env`), because it contains your database password and JWT secret.
+| `MongooseServerSelectionError` on Heroku | Atlas Network Access must allow `0.0.0.0/0`; check `MONGODB_URI` (password URL-encoded). |
+| CORS errors in the browser | Set Heroku `FRONTEND_URL` to your exact Vercel origin (no trailing slash). |
+| API calls hit `localhost` on Vercel | `VITE_API_URL` missing → add it and **redeploy**. |
+| First admin | `heroku run "node scripts/create-admin.js <email> <password>"` |

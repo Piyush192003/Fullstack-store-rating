@@ -1,50 +1,46 @@
-const Sequelize = require('sequelize');
-const sequelize = require('../config/db');
+const User = require('./user');
+const Store = require('./store');
+const Rating = require('./rating');
+const Category = require('./category');
+const ReviewHelp = require('./reviewHelp');
+const Favorite = require('./favorite');
+const Notification = require('./notification');
 
-const User = require('./user')(sequelize);
-const Store = require('./store')(sequelize);
-const Rating = require('./rating')(sequelize);
-const Category = require('./category')(sequelize);
-const ReviewHelp = require('./reviewhelp')(sequelize);
-const Favorite = require('./favorite')(sequelize);
-const Notification = require('./notification')(sequelize);
+// Emulates the old SQL ON DELETE CASCADE behaviour of the user relations.
+async function deleteUserCascade(userId) {
+  const ratings = await Rating.find({ userId }).select('_id');
+  const ratingIds = ratings.map((r) => r._id);
 
-// Relations
-User.hasMany(Rating, { foreignKey: 'userId', onDelete: 'CASCADE' });
-Rating.belongsTo(User, { foreignKey: 'userId' });
+  await Promise.all([
+    ReviewHelp.deleteMany({ $or: [{ userId }, { ratingId: { $in: ratingIds } }] }),
+    Rating.deleteMany({ userId }),
+    Favorite.deleteMany({ userId }),
+    Notification.deleteMany({ userId }),
+    // Owned stores become claimable again (old SQL set ownerId to NULL)
+    Store.updateMany({ ownerId: userId }, { $set: { ownerId: null } })
+  ]);
+}
 
-Store.hasMany(Rating, { foreignKey: 'storeId', onDelete: 'CASCADE' });
-Rating.belongsTo(Store, { foreignKey: 'storeId' });
+// Emulates the old SQL cascades of the store relations.
+async function deleteStoreCascade(storeId) {
+  const ratings = await Rating.find({ storeId }).select('_id');
+  const ratingIds = ratings.map((r) => r._id);
 
-User.hasOne(Store, { foreignKey: 'ownerId' });
-Store.belongsTo(User, { as: 'owner', foreignKey: 'ownerId' });
-
-// Categories
-Category.hasMany(Store, { foreignKey: 'categoryId' });
-Store.belongsTo(Category, { foreignKey: 'categoryId' });
-
-// Helpful votes
-Rating.hasMany(ReviewHelp, { foreignKey: 'ratingId', onDelete: 'CASCADE' });
-ReviewHelp.belongsTo(Rating, { foreignKey: 'ratingId' });
-User.hasMany(ReviewHelp, { foreignKey: 'userId', onDelete: 'CASCADE' });
-ReviewHelp.belongsTo(User, { foreignKey: 'userId' });
-
-// Favorites
-User.hasMany(Favorite, { foreignKey: 'userId', onDelete: 'CASCADE' });
-Favorite.belongsTo(User, { foreignKey: 'userId' });
-Store.hasMany(Favorite, { foreignKey: 'storeId', onDelete: 'CASCADE' });
-Favorite.belongsTo(Store, { foreignKey: 'storeId' });
-
-// Notifications
-User.hasMany(Notification, { foreignKey: 'userId', onDelete: 'CASCADE' });
+  await Promise.all([
+    ReviewHelp.deleteMany({ ratingId: { $in: ratingIds } }),
+    Rating.deleteMany({ storeId }),
+    Favorite.deleteMany({ storeId })
+  ]);
+}
 
 module.exports = {
-  sequelize,
   User,
   Store,
   Rating,
   Category,
   ReviewHelp,
   Favorite,
-  Notification
+  Notification,
+  deleteUserCascade,
+  deleteStoreCascade
 };

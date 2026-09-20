@@ -3,11 +3,28 @@ require('dotenv').config();
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const { sequelize, User, Store } = require('./models');
+const { connectDB } = require('./config/db');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// CORS: allow the deployed frontend (FRONTEND_URL, comma-separated list).
+// If FRONTEND_URL is not set, all origins are allowed (handy for Vercel preview URLs).
+const allowedOrigins = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+        return cb(null, true);
+      }
+      return cb(null, false);
+    }
+  })
+);
+app.use(express.json({ limit: '2mb' }));
 
 // Serve uploaded store images
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -20,20 +37,26 @@ app.use('/api/admin', require('./routes/admin'));
 app.use('/api/user', require('./routes/user'));
 app.use('/api/owner', require('./routes/owner'));
 
-const PORT = process.env.PORT || 5000;
+// Health probe (uptime checks / deployment verification)
+app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-(async () => {
-  try {
-    await sequelize.authenticate();
-    console.log('DB connected');
-    await sequelize.sync({ alter: true });
+// Exported so tests can start the app programmatically
+module.exports = app;
 
-    // NOTE: There is no automatic admin seeding anymore.
-    // If you ever lose admin access, recover from the command line (BackEnd folder):
-    //   node scripts/unlock-user.js <email> [newPassword]
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
 
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-  } catch (err) {
-    console.error('Unable to start server:', err);
-  }
-})();
+  (async () => {
+    try {
+      await connectDB();
+
+      // NOTE: There is no automatic admin seeding.
+      // Create the first admin on a fresh database with:
+      //   npm run create-admin -- <email> <password>
+      app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    } catch (err) {
+      console.error('Unable to start server:', err);
+      process.exit(1);
+    }
+  })();
+}

@@ -9,6 +9,8 @@ const { registerValidation, loginValidation } = require('../utils/validators');
 // Public
 router.post('/register', registerValidation, authController.register);
 router.post('/login', loginValidation, authController.login);
+// One-click temporary demo accounts (auto-expire after 24h)
+router.post('/guest-login', authController.guestLogin);
 
 // Signed-in account (any role)
 router.get('/me', auth, authController.me);
