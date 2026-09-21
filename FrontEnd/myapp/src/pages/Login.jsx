@@ -112,7 +112,7 @@ export default function Login() {
           </button>
         </div>
         <p className="muted" style={{ fontSize: 12, marginTop: 8, textAlign: "center" }}>
-          Guest sessions are temporary and removed automatically after 24 hours.
+          👤 Guest User = fresh reviewer (removed after 24h) · 🏪 Guest Owner = same shared demo account every time
         </p>
 
         <p className="muted" style={{ marginTop: 20 }}>

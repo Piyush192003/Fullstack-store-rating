@@ -130,6 +130,10 @@ async function cleanupExpiredGuests() {
   }
 }
 
+// One shared demo owner: every "Login as Guest Owner" opens the SAME account
+// and the SAME demo store, so reviews/notifications accumulate across sessions.
+const DEMO_OWNER_EMAIL = 'guest.owner@demo.local';
+
 exports.guestLogin = async (req, res) => {
   try {
     const role = req.body.role === 'owner' ? 'owner' : 'user';
@@ -137,34 +141,55 @@ exports.guestLogin = async (req, res) => {
     // Best-effort housekeeping of expired demo accounts (fire & forget)
     cleanupExpiredGuests().catch(() => {});
 
+    // ---- Owner: always the single shared demo account ----
+    if (role === 'owner') {
+      let owner = await User.findOne({ role: 'owner', email: DEMO_OWNER_EMAIL });
+      if (!owner) {
+        owner = await User.create({
+          name: 'Guest Owner',
+          email: DEMO_OWNER_EMAIL,
+          password: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10), // unguessable
+          role: 'owner',
+          isGuest: true,
+          guestExpiresAt: null, // never auto-expires (not touched by cleanup)
+          address: 'Shared demo account'
+        });
+      }
+      if (owner.isSuspended) { // keep the public demo always usable
+        owner.isSuspended = false;
+        await owner.save();
+      }
+
+      // Ensure the demo store exists (recreate if it was deleted)
+      if (!(await Store.findOne({ ownerId: owner.id }))) {
+        const category = await Category.findOne().sort({ name: 1 });
+        await Store.create({
+          name: `Guest's Demo Store`,
+          address: '123 Demo Street, Springfield',
+          categoryId: category ? category.id : null,
+          ownerId: owner.id,
+          isApproved: true // live so the demo works end-to-end
+        });
+      }
+
+      return res.json({ token: signToken(owner), user: publicUser(owner) });
+    }
+
+    // ---- User: a fresh temporary reviewer each time (24h, auto-cleaned) ----
     const suffix = `${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
     const rawPassword = crypto.randomBytes(24).toString('hex'); // unguessable; guests never sign in manually
 
     const user = await User.create({
-      name: role === 'owner' ? 'Guest Owner' : 'Guest User',
-      email: `guest.${role}.${suffix}@guest.local`,
+      name: 'Guest User',
+      email: `guest.user.${suffix}@guest.local`,
       password: await bcrypt.hash(rawPassword, 10),
-      role,
+      role: 'user',
       isGuest: true,
       guestExpiresAt: new Date(Date.now() + GUEST_TTL_MS),
       address: 'Temporary demo session (expires in 24h)'
     });
 
-    // Give guest owners a live demo store so their dashboard is fully functional
-    if (role === 'owner') {
-      const category = await Category.findOne().sort({ name: 1 });
-      await Store.create({
-        name: `Guest's Demo Store`,
-        address: '123 Demo Street, Springfield',
-        categoryId: category ? category.id : null,
-        ownerId: user.id,
-        isApproved: true // live immediately so the demo works end-to-end
-      });
-    }
-
-    const token = signToken(user);
-
-    return res.json({ token, user: publicUser(user) });
+    return res.json({ token: signToken(user), user: publicUser(user) });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

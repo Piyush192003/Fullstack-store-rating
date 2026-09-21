@@ -96,15 +96,27 @@ test('guest user login gives a working user session', async () => {
   assert.ok(Array.isArray(stores.body));
 });
 
-test('guest owner login gives a working owner session with demo store', async () => {
-  const g = await req('POST', '/auth/guest-login', { body: { role: 'owner' } });
-  assert.strictEqual(g.status, 200);
-  assert.strictEqual(g.body.user.role, 'owner');
-  assert.strictEqual(g.body.user.name, 'Guest Owner');
+test('guest owner login reuses ONE shared demo account + demo store', async () => {
+  const g1 = await req('POST', '/auth/guest-login', { body: { role: 'owner' } });
+  assert.strictEqual(g1.status, 200);
+  assert.strictEqual(g1.body.user.role, 'owner');
+  assert.strictEqual(g1.body.user.name, 'Guest Owner');
 
-  const dash = await req('GET', '/owner/ratings', { token: g.body.token });
+  const g2 = await req('POST', '/auth/guest-login', { body: { role: 'owner' } });
+  assert.strictEqual(g2.status, 200);
+  assert.strictEqual(g2.body.user.id, g1.body.user.id, 'guest owner must be the same shared account every time');
+
+  const dash = await req('GET', '/owner/ratings', { token: g2.body.token });
   assert.strictEqual(dash.status, 200);
   assert.strictEqual(dash.body.store.name, "Guest's Demo Store");
+});
+
+test('guest user logins create a fresh reviewer each time', async () => {
+  const a = await req('POST', '/auth/guest-login', { body: { role: 'user' } });
+  assert.strictEqual(a.status, 200);
+  const b = await req('POST', '/auth/guest-login', { body: { role: 'user' } });
+  assert.strictEqual(b.status, 200);
+  assert.notStrictEqual(b.body.user.id, a.body.user.id, 'each guest user must be a different person');
 });
 
 test('guest login without role defaults to user', async () => {
