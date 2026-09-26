@@ -112,21 +112,36 @@ exports.login = async (req, res) => {
   }
 };
 
-// ---------- GUEST LOGIN ----------
+// ---------- GUEST LOGIN (optimized for <1-2s on cold Render free tier) ----------
 // Creates a one-click temporary demo account (user or owner) so anyone can try
 // the app instantly. Guest accounts auto-expire after 24h and are then removed
 // together with their data (stores, ratings, favorites, notifications).
 const GUEST_TTL_MS = 24 * 60 * 60 * 1000;
+// Cheap hash for guest throwaway passwords: the password is a 48-char random
+// secret that is never used to sign in, so cost 4 is plenty and saves
+// ~100-200ms of CPU on Render's weak free-tier CPUs vs cost 10.
+const GUEST_BCRYPT_COST = 4;
+// Throttle background cleanup so it runs at most once per 10 min per instance
+// and never blocks the login response.
+let lastGuestCleanupAt = 0;
+const GUEST_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 
 async function cleanupExpiredGuests() {
+  const now = Date.now();
+  if (now - lastGuestCleanupAt < GUEST_CLEANUP_INTERVAL_MS) return;
+  lastGuestCleanupAt = now;
   const expired = await User.find({
     isGuest: true,
     guestExpiresAt: { $ne: null, $lt: new Date() }
-  }).select('_id');
-
+  })
+    .select('_id')
+    .limit(20)
+    .lean();
   for (const guest of expired) {
-    await deleteUserCascade(guest.id);
-    await User.deleteOne({ _id: guest._id });
+    try {
+      await deleteUserCascade(guest._id);
+      await User.deleteOne({ _id: guest._id });
+    } catch {}
   }
 }
 
@@ -134,45 +149,68 @@ async function cleanupExpiredGuests() {
 // and the SAME demo store, so reviews/notifications accumulate across sessions.
 const DEMO_OWNER_EMAIL = 'guest.owner@demo.local';
 
+// Cache the demo owner id in-memory so repeat logins skip the User lookup
+// (falls back to DB on miss; invalidated automatically on failure).
+let cachedDemoOwnerId = null;
+
 exports.guestLogin = async (req, res) => {
   try {
     const role = req.body.role === 'owner' ? 'owner' : 'user';
 
-    // Best-effort housekeeping of expired demo accounts (fire & forget)
-    cleanupExpiredGuests().catch(() => {});
+    // Best-effort housekeeping AFTER the response is sent (never blocks login).
+    // Scheduled via setImmediate so zero extra latency is added to this request.
+    setImmediate(() => cleanupExpiredGuests().catch(() => {}));
 
     // ---- Owner: always the single shared demo account ----
     if (role === 'owner') {
-      let owner = await User.findOne({ role: 'owner', email: DEMO_OWNER_EMAIL });
+      let owner = null;
+      if (cachedDemoOwnerId) {
+        owner = await User.findById(cachedDemoOwnerId).select('_id role tokenVersion isSuspended').lean();
+        if (!owner) cachedDemoOwnerId = null;
+      }
       if (!owner) {
-        owner = await User.create({
+        owner = await User.findOne({ role: 'owner', email: DEMO_OWNER_EMAIL })
+          .select('_id role tokenVersion isSuspended')
+          .lean();
+      }
+      if (!owner) {
+        const created = await User.create({
           name: 'Guest Owner',
           email: DEMO_OWNER_EMAIL,
-          password: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10), // unguessable
+          password: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), GUEST_BCRYPT_COST), // unguessable
           role: 'owner',
           isGuest: true,
           guestExpiresAt: null, // never auto-expires (not touched by cleanup)
           address: 'Shared demo account'
         });
+        owner = created.toObject();
       }
-      if (owner.isSuspended) { // keep the public demo always usable
+      cachedDemoOwnerId = owner._id;
+      if (owner.isSuspended) {
+        // Single cheap update instead of full doc save()
+        await User.updateOne({ _id: owner._id }, { $set: { isSuspended: false } });
         owner.isSuspended = false;
-        await owner.save();
       }
 
-      // Ensure the demo store exists (recreate if it was deleted)
-      if (!(await Store.findOne({ ownerId: owner.id }))) {
-        const category = await Category.findOne().sort({ name: 1 });
+      // Ensure the demo store exists (recreate if it was deleted).
+      // .lean() + only _id keeps this to one tiny indexed query in the hot path.
+      const storeExists = await Store.exists({ ownerId: owner._id });
+      if (!storeExists) {
+        const category = await Category.findOne().sort({ name: 1 }).select('_id').lean();
         await Store.create({
           name: `Guest's Demo Store`,
           address: '123 Demo Street, Springfield',
-          categoryId: category ? category.id : null,
-          ownerId: owner.id,
+          categoryId: category ? category._id : null,
+          ownerId: owner._id,
           isApproved: true // live so the demo works end-to-end
         });
       }
 
-      return res.json({ token: signToken(owner), user: publicUser(owner) });
+      const tokenUser = { id: owner._id, tokenVersion: owner.tokenVersion || 0 };
+      return res.json({
+        token: signToken(tokenUser),
+        user: { id: owner._id, name: 'Guest Owner', email: DEMO_OWNER_EMAIL, role: 'owner', isGuest: true }
+      });
     }
 
     // ---- User: a fresh temporary reviewer each time (24h, auto-cleaned) ----
@@ -182,7 +220,7 @@ exports.guestLogin = async (req, res) => {
     const user = await User.create({
       name: 'Guest User',
       email: `guest.user.${suffix}@guest.local`,
-      password: await bcrypt.hash(rawPassword, 10),
+      password: await bcrypt.hash(rawPassword, GUEST_BCRYPT_COST),
       role: 'user',
       isGuest: true,
       guestExpiresAt: new Date(Date.now() + GUEST_TTL_MS),

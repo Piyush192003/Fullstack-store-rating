@@ -35,13 +35,17 @@ const userSchema = new mongoose.Schema(
     settings: { type: Object, default: {} },
 
     // Guest demo accounts (Login page "continue as guest") expire automatically
-    isGuest: { type: Boolean, default: false },
-    guestExpiresAt: { type: Date, default: null },
+    isGuest: { type: Boolean, default: false, index: true },
+    guestExpiresAt: { type: Date, default: null, index: true },
 
-    role: { type: String, enum: ['admin', 'user', 'owner'], default: 'user' }
+    role: { type: String, enum: ['admin', 'user', 'owner'], default: 'user', index: true }
   },
   { timestamps: true, minimize: false }
 );
+
+// Fast guest-login lookups: expiry sweep + shared demo-owner findOne
+userSchema.index({ isGuest: 1, guestExpiresAt: 1 });
+userSchema.index({ role: 1, email: 1 });
 
 applyIdAndJson(userSchema, 'users');
 
