@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import api, { warmupBackend } from "../utils/api";
+import api, { warmupBackend, apiOrigin } from "../utils/api";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -20,9 +20,10 @@ export default function Login() {
     setWarming(true);
     // Pre-connect (DNS + TLS handshake) to the API origin early, so the
     // later guest-login POST skips that setup cost (~300-800ms on 4G).
+    // Skipped automatically for same-origin / proxied API URLs.
     try {
-      const origin = new URL(api.defaults.baseURL).origin;
-      if (!document.querySelector(`link[rel="preconnect"][href="${origin}"]`)) {
+      const origin = apiOrigin();
+      if (origin && !document.querySelector(`link[rel="preconnect"][href="${origin}"]`)) {
         const link = document.createElement("link");
         link.rel = "preconnect";
         link.href = origin;

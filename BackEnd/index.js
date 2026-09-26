@@ -12,23 +12,55 @@ const app = express();
 // is the main reason the first guest login feels slow).
 warmupDB();
 
-// CORS: allow the deployed frontend (FRONTEND_URL, comma-separated list).
-// If FRONTEND_URL is not set, all origins are allowed (handy for Vercel preview URLs).
-const allowedOrigins = (process.env.FRONTEND_URL || '')
+// CORS: allowed frontend origins.
+// - Extra origins via FRONTEND_URL env (comma-separated).
+// - Production Vercel URL + all Vercel preview URLs + local dev are ALWAYS
+//   allowed in code, so no dashboard env change is ever required.
+const envOrigins = (process.env.FRONTEND_URL || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
-        return cb(null, true);
-      }
-      return cb(null, false);
-    }
-  })
-);
+const ALWAYS_ALLOWED = [
+  'https://fullstack-store-rating.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173'
+];
+// e.g. https://fullstack-store-rating-git-main-xyz.vercel.app (preview deploys)
+const VERCEL_PREVIEW_RE = /^https:\/\/.*\.vercel\.app$/;
+
+const allowedSet = new Set([...ALWAYS_ALLOWED, ...envOrigins]);
+
+function isOriginAllowed(origin) {
+  if (!origin) return true; // curl / uptime monitors / same-origin
+  if (allowedSet.has(origin)) return true;
+  if (VERCEL_PREVIEW_RE.test(origin)) return true;
+  if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  return false;
+}
+
+const corsOptions = {
+  origin(origin, cb) {
+    // IMPORTANT: never call cb(null, false) — that sends NO header and the
+    // browser reports "blocked by CORS policy" (exactly the reported bug).
+    // Unknown origins get an explicit error instead.
+    if (isOriginAllowed(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  // Preflight result cached 24h by the browser → 2nd guest click skips OPTIONS
+  maxAge: 86400,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+// Explicit preflight handler (Express 5-safe: no '*' path pattern)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return cors(corsOptions)(req, res, next);
+  next();
+});
 // Faster preflight + JSON responses
 app.use(compression());
 app.use(express.json({ limit: '2mb' }));
