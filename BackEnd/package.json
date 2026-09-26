@@ -11,6 +11,7 @@
     "dev": "nodemon index.js",
     "create-admin": "node scripts/create-admin.js",
     "seed-categories": "node scripts/seed-categories.js",
+    "seed-demo-stores": "node scripts/seed-demo-stores.js",
     "test": "node --test --test-force-exit tests/api.test.js"
   },
   "keywords": [],

@@ -94,13 +94,15 @@ if (require.main === module) {
     try {
       await connectDB();
 
-      // Seed reference data (default categories) on a fresh database.
-      // Admin-created categories are never touched.
+      // Seed reference data (default categories + demo stores) on a fresh database.
+      // Admin-created categories and existing stores are never touched.
       try {
         const { ensureDefaultCategories } = require('./scripts/seed-categories');
         await ensureDefaultCategories();
+        const { ensureDemoStores } = require('./scripts/seed-demo-stores');
+        await ensureDemoStores();
       } catch (seedErr) {
-        console.warn('Category seeding skipped:', seedErr.message);
+        console.warn('Seeding skipped:', seedErr.message);
       }
 
       // NOTE: There is no automatic admin seeding.
